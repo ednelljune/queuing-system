@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Ticket Progress</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
+  <style>
+    body { max-width: 700px; margin: 2rem auto; }
+    .step { padding: 0.5rem 0; }
+    .done { color: #2d7; }
+    .current { color: #08c; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2>Progress for Ticket <code id="ticket">—</code></h2>
+    <p id="studentMeta" class="muted"></p>
+    <div id="steps"></div>
+  </main>
+
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const ticket = qs.get("ticket");
+    document.getElementById("ticket").textContent = ticket || "—";
+
+    const socket = io();
+
+    async function load() {
+      if (!ticket) return;
+      const res = await fetch(`/api/student/${encodeURIComponent(ticket)}`);
+      if (!res.ok) return;
+      const s = await res.json();
+      renderStudent(s);
+    }
+
+    function renderStudent(s) {
+      document.getElementById("studentMeta").textContent =
+        `${s.name || "Student"} — ${s.program || ""} (${s.status})`;
+
+      fetch("/api/status").then(r => r.json()).then(st => {
+        const order = st.steps.map(x => x.key);
+        const labels = Object.fromEntries(st.steps.map(x => [x.key, x.label]));
+        const current = s.stepKey;
+        const doneSet = new Set(
+          s.history.filter(h => h.action === "complete").map(h => h.stepKey)
+        );
+
+        const html = order.map(k => {
+          const isDone = doneSet.has(k);
+          const isCurrent = k === current && s.status !== "complete";
+          const cls = isDone ? "done" : isCurrent ? "current" : "";
+          const mark = isDone ? "✓" : isCurrent ? "⏳" : "□";
+          return `<div class="step ${cls}">${mark} ${labels[k]}</div>`;
+        }).join("");
+
+        document.getElementById("steps").innerHTML = html;
+      });
+    }
+
+    socket.on("student:update", (u) => {
+      if (u.ticket === ticket) renderStudent(u);
+    });
+
+    load();
+  </script>
+</body>
+</html>

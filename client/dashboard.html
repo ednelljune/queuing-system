@@ -1,0 +1,255 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Department Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
+  <style>
+    body { max-width: 960px; margin: 2rem auto; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .muted { color: #777; }
+    code { font-weight: 600; }
+    .controls { display: flex; flex-wrap: wrap; gap: .5rem; }
+    .toggle { margin: .25rem 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2 id="title">Department Dashboard</h2>
+    <p class="muted">Use actions to progress students. Start Next will pull a student if none is currently serving.</p>
+
+    <div class="row">
+      <article>
+        <header><strong>Now Serving</strong></header>
+        <p>Ticket: <code id="serving">-</code></p>
+        <p id="studentMeta" class="muted">Student: - | Program: - | Status: -</p>
+
+        <!-- Sound and voice toggles -->
+        <div class="toggle">
+          <label>
+            <input type="checkbox" id="soundToggle" />
+            Sound on next ticket
+          </label>
+        </div>
+        <div class="toggle" style="margin-bottom:.75rem;">
+          <label>
+            <input type="checkbox" id="voiceToggle" />
+            Voice: announce next number
+          </label>
+        </div>
+
+        <div class="controls">
+          <button id="startNext">Start Next</button>
+          <button id="complete" class="secondary">Mark Completed</button>
+          <button id="hold" class="secondary">Put on Hold</button>
+          <button id="skip" class="secondary">Skip</button>
+        </div>
+        <footer class="muted" style="margin-top:.5rem;">Hotkeys: N start, C complete, H hold, S skip</footer>
+      </article>
+
+      <article>
+        <header><strong>Queue - Next</strong></header>
+        <ul id="queue"></ul>
+        <footer class="muted"><span id="count"></span> in queue</footer>
+      </article>
+    </div>
+
+    <article>
+      <header><strong>On Hold</strong></header>
+      <ul id="holdList"></ul>
+    </article>
+  </main>
+
+  <script>
+    // Identify which department this dashboard controls
+    const qs = new URLSearchParams(location.search);
+    const stepKey = qs.get("dept") || "registration";
+
+    // Socket and state
+    const socket = io();
+    let state = null;
+
+    // Elements
+    const servingEl = document.getElementById("serving");
+    const queueEl = document.getElementById("queue");
+    const holdEl = document.getElementById("holdList");
+    const countEl = document.getElementById("count");
+    const titleEl = document.getElementById("title");
+    const studentMeta = document.getElementById("studentMeta");
+
+    // Sound and voice toggles
+    const soundToggle = document.getElementById("soundToggle");
+    const voiceToggle = document.getElementById("voiceToggle");
+
+    // Persist toggle states
+    soundToggle.checked = localStorage.getItem("queueSound") === "1";
+    soundToggle.addEventListener("change", () => {
+      localStorage.setItem("queueSound", soundToggle.checked ? "1" : "0");
+    });
+    voiceToggle.checked = localStorage.getItem("queueVoice") === "1";
+    voiceToggle.addEventListener("change", () => {
+      localStorage.setItem("queueVoice", voiceToggle.checked ? "1" : "0");
+    });
+
+    // Beep - no audio files needed
+    let audioCtx = null;
+    function ensureAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    }
+    function playBeep(freq = 880, duration = 0.18) {
+      if (!soundToggle.checked) return;
+      ensureAudio();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const now = audioCtx.currentTime;
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + duration);
+    }
+
+    // Text to speech support
+    function supportsTTS() {
+      return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+    }
+
+    // Prefer a female English voice if available
+    let selectedVoice = null;
+    function pickFemaleVoice(voices) {
+      const preferredNames = [
+        "Google UK English Female","Google US English","Samantha","Victoria",
+        "Karen","Tessa","Serena","Zira","Jenny","Aria","Lia","Lucy",
+      ];
+      return voices.find(v =>
+        /female/i.test(v.name) || preferredNames.some(name => v.name.includes(name))
+      ) || null;
+    }
+    function pickEnglishVoice(voices) {
+      return voices.find(v => /^en(-|_)/i.test(v.lang)) || null;
+    }
+    function loadVoicesAndSelect() {
+      if (!supportsTTS()) return;
+      const voices = window.speechSynthesis.getVoices();
+      selectedVoice = pickFemaleVoice(voices) || pickEnglishVoice(voices) || voices[0] || null;
+    }
+    if (supportsTTS()) {
+      loadVoicesAndSelect();
+      window.speechSynthesis.onvoiceschanged = loadVoicesAndSelect;
+    }
+
+    // Spell out ticket characters, e.g. A102 -> A 1 0 2
+    function spellTicket(t) {
+      return String(t).split("").join(" ");
+    }
+
+    // Say: Next number for {Department} is {A 1 0 2}
+    let lastAnnounced = null;
+    function sayNext(ticket, stepLabel, phrase = "Next number for") {
+      if (!voiceToggle.checked || !supportsTTS() || !ticket) return;
+      try {
+        const dept = stepLabel || "this department";
+        const u = new SpeechSynthesisUtterance(`${phrase} ${dept} is ${spellTicket(ticket)}`);
+        if (selectedVoice) u.voice = selectedVoice;
+        u.rate = 0.9;   // slower than default
+        u.pitch = 1.0;  // natural pitch
+        u.volume = 1.0;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+        lastAnnounced = ticket;
+      } catch {}
+    }
+
+    // Track department label for announcements
+    let currentStepLabel = null;
+
+    // Render state
+    let prevServing = null;
+
+    socket.on("state:update", (s) => {
+      state = s;
+      const step = s.steps.find(x => x.key === stepKey);
+      if (step) {
+        titleEl.textContent = `${step.label} - Dashboard`;
+        currentStepLabel = step.label;
+      }
+      render();
+    });
+
+    async function render() {
+      if (!state) return;
+      const q = state.queues[stepKey] || [];
+      const serving = state.currentServing[stepKey] || null;
+
+      servingEl.textContent = serving || "-";
+      queueEl.innerHTML = q.map(t => `<li><code>${t}</code></li>`).join("");
+      countEl.textContent = q.length;
+
+      // Show basic meta for the serving ticket if available
+      if (serving) {
+        const res = await fetch(`/api/department/${encodeURIComponent(stepKey)}/serving`).catch(() => null);
+        if (res && res.ok) {
+          const { student } = await res.json();
+          if (student) {
+            studentMeta.textContent =
+              `Student: ${student.name || "-"} | Program: ${student.program || "-"} | Status: ${student.status || "-"}`;
+          } else {
+            studentMeta.textContent = "Student: - | Program: - | Status: -";
+          }
+        } else {
+          studentMeta.textContent = "Student: - | Program: - | Status: -";
+        }
+      } else {
+        studentMeta.textContent = "Student: - | Program: - | Status: -";
+      }
+
+      // Announce when serving changes (socket updates or other stations)
+      if (prevServing !== null && serving && serving !== prevServing && serving !== lastAnnounced) {
+        sayNext(serving, currentStepLabel);
+      }
+      prevServing = serving;
+
+      // Simple holds placeholder (avoid server dependency if endpoint not present)
+      holdEl.innerHTML = "<li class='muted'>Use Admin or API to list holds.</li>";
+    }
+
+    // Actions
+    async function post(path) {
+      const res = await fetch(path, { method: "POST" });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(out.error || "Action failed");
+        return out;
+      }
+      // On successful start-next, beep and speak the ticket
+      if (path.endsWith("/start-next") && out && out.ticket) {
+        playBeep();
+        sayNext(out.ticket, currentStepLabel);
+      }
+      return out;
+    }
+
+    document.getElementById("startNext").onclick = () => post(`/api/department/${stepKey}/start-next`);
+    document.getElementById("complete").onclick  = () => post(`/api/department/${stepKey}/complete`);
+    document.getElementById("hold").onclick      = () => post(`/api/department/${stepKey}/hold`);
+    document.getElementById("skip").onclick      = () => post(`/api/department/${stepKey}/skip`);
+
+    // Hotkeys
+    window.addEventListener("keydown", (e) => {
+      const k = e.key.toLowerCase();
+      if (["n","c","h","s"].includes(k)) e.preventDefault();
+      if (k === "n") document.getElementById("startNext").click();
+      if (k === "c") document.getElementById("complete").click();
+      if (k === "h") document.getElementById("hold").click();
+      if (k === "s") document.getElementById("skip").click();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Student Check-in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://cdn.socket.io" />
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
+  <style>
+    body { max-width: 860px; margin: 2rem auto; }
+    .ticket { padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2>Enrolment Queue • Student Check-in</h2>
+
+    <article>
+      <header><strong>Please check in</strong></header>
+      <form id="checkinForm">
+        <label>Name <input name="name" required /></label>
+        <label>Student ID <input name="studentId" /></label>
+        <label>Program <input name="program" required /></label>
+        <label>Email <input type="email" name="email" /></label>
+        <button type="submit">Verify & Assign Ticket</button>
+      </form>
+    </article>
+
+    <article id="ticketCard" class="ticket" hidden>
+      <h3>Your Ticket: <span id="ticket"></span></h3>
+      <p>Current Step: <span id="currentStep"></span></p>
+      <p><a id="progressLink" href="#">Open progress page</a></p>
+      <p><a href="/display.html" target="_blank">See public display</a></p>
+    </article>
+  </main>
+
+  <script>
+    const form = document.getElementById("checkinForm");
+    const ticketCard = document.getElementById("ticketCard");
+    const ticketEl = document.getElementById("ticket");
+    const stepEl = document.getElementById("currentStep");
+    const progressLink = document.getElementById("progressLink");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(form).entries());
+
+      const res = await fetch("/api/checkin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const out = await res.json();
+      if (res.ok) {
+        ticketEl.textContent = out.ticket;
+        stepEl.textContent = out.steps.find(s => s.key === out.stepKey).label;
+        progressLink.href = `/progress.html?ticket=${encodeURIComponent(out.ticket)}`;
+        ticketCard.hidden = false;
+        form.reset();
+      } else {
+        alert(out.error || "Error");
+      }
+    });
+  </script>
+</body>
+</html>

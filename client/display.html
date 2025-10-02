@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Public Queue Display</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
+  <style>
+    body { max-width: 1200px; margin: 1rem auto; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    @media (max-width: 900px){ .grid { grid-template-columns: 1fr; } }
+    .card { padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+    .now { font-size: 2rem; font-weight: 800; }
+    .next { color: #666; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2>Now Serving</h2>
+    <div id="board" class="grid"></div>
+  </main>
+
+  <script>
+    const socket = io();
+    let state = null;
+
+    socket.on("state:update", (s) => {
+      state = s;
+      render();
+    });
+
+    function render() {
+      const b = document.getElementById("board");
+      b.innerHTML = state.steps.map(step => {
+        const serving = state.currentServing[step.key] || "—";
+        const q = state.queues[step.key] || [];
+        const next = q[0] || "—";
+        return `
+          <section class="card">
+            <h3>${step.label}</h3>
+            <div class="now">${serving}</div>
+            <div class="next">Up Next: <strong>${next}</strong></div>
+          </section>
+        `;
+      }).join("");
+    }
+  </script>
+</body>
+</html>
