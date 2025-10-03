@@ -33,9 +33,9 @@
     function render() {
       const b = document.getElementById("board");
       b.innerHTML = state.steps.map(step => {
-        const serving = state.currentServing[step.key] || "—";
+        const serving = state.currentServing[step.key] || "-";
         const q = state.queues[step.key] || [];
-        const next = q[0] || "—";
+        const next = q[0] || "-";
         return `
           <section class="card">
             <h3>${step.label}</h3>

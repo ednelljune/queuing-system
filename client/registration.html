@@ -1,0 +1,271 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Step 1 • Registration (M101)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
+  <style>
+    body { max-width: 1000px; margin: 2rem auto; }
+    .muted { color:#777; }
+    .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
+    .grid-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:.5rem; }
+    @media (max-width: 900px){ .grid-2,.grid-3 { grid-template-columns:1fr; } }
+    textarea,input,select { width:100%; }
+    details > summary { cursor: pointer; }
+    code { font-weight:600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2>Step 1 • Registration (M101)</h2>
+    <p class="muted">Verify/collect student details. Use Save to persist before Complete.</p>
+
+    <article>
+      <header><strong>Now Serving</strong></header>
+      <p>Ticket: <code id="serving">-</code></p>
+      <p id="studentMeta" class="muted">Student: - | Program: - | Status: -</p>
+
+      <div class="grid-3">
+        <label>Staff name
+          <input id="staffName" placeholder="e.g., Joy" />
+        </label>
+        <label><input type="checkbox" id="soundToggle" /> Sound on next ticket</label>
+        <label><input type="checkbox" id="voiceToggle" /> Voice: announce next number</label>
+      </div>
+
+      <details style="margin:.5rem 0 1rem;">
+        <summary><strong>Notes (optional)</strong></summary>
+        <textarea id="noteText" rows="3" placeholder="Add a note..."></textarea>
+        <div style="margin-top:.5rem;"><button id="addNote" class="secondary">Add note</button></div>
+        <ul id="notesList" style="margin-top:.5rem;"></ul>
+      </details>
+
+      <div class="grid-2">
+        <button id="startNext">Start Next</button>
+        <button id="complete" class="secondary">Complete Step</button>
+      </div>
+      <div class="grid-2" style="margin-top:.5rem;">
+        <button id="hold" class="secondary">Put on Hold</button>
+        <button id="skip" class="secondary">Skip</button>
+      </div>
+      <p id="nextLink" class="muted" style="display:none;margin-top:.5rem;"></p>
+    </article>
+
+    <!-- Mini Queue -->
+    <article style="margin-top:1rem;">
+      <header><strong>Queue — Next</strong></header>
+      <ul id="queue"></ul>
+      <footer class="muted"><span id="count">0</span> in queue</footer>
+    </article>
+
+    <article style="margin-top:1rem;">
+      <header><strong>Registration Form</strong></header>
+
+      <div class="grid-2">
+        <label>Student ID <input id="studentId" /></label>
+        <label>USI Number <input id="usi" /></label>
+      </div>
+
+      <div class="grid-2">
+        <label>Student Full Name <input id="fullName" /></label>
+        <label>Date of Birth <input id="dob" type="date" /></label>
+      </div>
+
+      <div class="grid-2">
+        <label>Course Name <input id="courseName" /></label>
+        <label>Intake Date <input id="intakeDate" type="date" /></label>
+      </div>
+
+      <div class="grid-3">
+        <label>Campus
+          <select id="campus"><option value="">Select</option><option>Sydney</option><option>Newcastle</option></select>
+        </label>
+        <label style="align-self:end;"><input type="checkbox" id="usiRegistered" /> USI registered</label>
+        <label style="align-self:end;"><input type="checkbox" id="emailCreated" /> KOI email created</label>
+      </div>
+
+      <div class="grid-3" style="margin-top:.25rem;">
+        <label style="align-self:end;"><input type="checkbox" id="detailsVerified" /> Student details verified</label>
+        <label style="align-self:end;"><input type="checkbox" id="detailsDone" /> All details done</label>
+        <div style="align-self:end;"><button id="saveForm" class="secondary">Save Registration</button></div>
+      </div>
+      <p id="saveStatus" class="muted"></p>
+    </article>
+  </main>
+
+  <script>
+    // ----- Config
+    const stepKey = "registration";
+
+    // ----- Elements
+    const servingEl = document.getElementById("serving");
+    const studentMeta = document.getElementById("studentMeta");
+    const staffNameInput = document.getElementById("staffName");
+    const soundToggle = document.getElementById("soundToggle");
+    const voiceToggle = document.getElementById("voiceToggle");
+    const noteText = document.getElementById("noteText");
+    const notesList = document.getElementById("notesList");
+    const nextLink = document.getElementById("nextLink");
+    const queueEl = document.getElementById("queue");
+    const countEl = document.getElementById("count");
+
+    // Form inputs
+    const f = {
+      studentId:      document.getElementById("studentId"),
+      usi:            document.getElementById("usi"),
+      fullName:       document.getElementById("fullName"),
+      dob:            document.getElementById("dob"),
+      courseName:     document.getElementById("courseName"),
+      intakeDate:     document.getElementById("intakeDate"),
+      campus:         document.getElementById("campus"),
+      usiRegistered:  document.getElementById("usiRegistered"),
+      emailCreated:   document.getElementById("emailCreated"),
+      detailsVerified:document.getElementById("detailsVerified"),
+      detailsDone:    document.getElementById("detailsDone"),
+    };
+    const saveBtn = document.getElementById("saveForm");
+    const saveStatus = document.getElementById("saveStatus");
+
+    // ----- Socket & state
+    const socket = io();
+    let state = null;
+    socket.on("state:update", (s)=>{ state=s; renderQueue(); render(); });
+
+    // ----- Prefs
+    staffNameInput.value = localStorage.getItem("queueStaff") || "";
+    soundToggle.checked = localStorage.getItem("queueSound")==="1";
+    voiceToggle.checked = localStorage.getItem("queueVoice")==="1";
+    staffNameInput.addEventListener("input", ()=> localStorage.setItem("queueStaff", staffNameInput.value.trim()));
+    soundToggle.addEventListener("change", ()=> localStorage.setItem("queueSound", soundToggle.checked?"1":"0"));
+    voiceToggle.addEventListener("change", ()=> localStorage.setItem("queueVoice", voiceToggle.checked?"1":"0"));
+
+    // ----- Ding-dong chime (two notes)
+    let audioCtx=null;
+    function ensureAudio(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); if(audioCtx.state==="suspended") audioCtx.resume(); }
+    function playChime(){ if(!soundToggle.checked) return; ensureAudio(); const now=audioCtx.currentTime;
+      function note(fr, start, dur, peak=0.28){ const o=audioCtx.createOscillator(); o.type="triangle"; o.frequency.setValueAtTime(fr,start);
+        const g=audioCtx.createGain(); g.gain.setValueAtTime(0.0001,start); g.gain.exponentialRampToValueAtTime(peak,start+0.01); g.gain.exponentialRampToValueAtTime(0.0001,start+dur);
+        o.connect(g).connect(audioCtx.destination); o.start(start); o.stop(start+dur+0.05);
+      }
+      note(880, now, 0.20, 0.30); note(587.33, now+0.24, 0.34, 0.24);
+    }
+
+    // ----- TTS (female-ish + slower)
+    function supportsTTS(){ return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window; }
+    let selectedVoice=null;
+    function pickFemale(vs){ const names=["Google UK English Female","Google US English","Samantha","Victoria","Karen","Tessa","Serena","Zira","Jenny","Aria","Lia","Lucy"]; return vs.find(v=>/female/i.test(v.name)||names.some(n=>v.name.includes(n)))||null; }
+    function pickEN(vs){ return vs.find(v=>/^en(-|_)/i.test(v.lang))||null; }
+    function loadVoices(){ if(!supportsTTS()) return; const vs=speechSynthesis.getVoices(); selectedVoice=pickFemale(vs)||pickEN(vs)||vs[0]||null; }
+    if(supportsTTS()){ loadVoices(); speechSynthesis.onvoiceschanged=loadVoices; }
+    function sayNext(ticket){ if(!voiceToggle.checked||!supportsTTS()||!ticket) return; const u=new SpeechSynthesisUtterance(`Next number for Registration is ${String(ticket).split("").join(" ")}`); if(selectedVoice) u.voice=selectedVoice; u.rate=0.9; speechSynthesis.cancel(); speechSynthesis.speak(u); }
+
+    // ----- Queue render
+    function renderQueue(){
+      const q = state?.queues?.[stepKey] || [];
+      queueEl.innerHTML = q.slice(0,10).map(t=>`<li><code>${t}</code></li>`).join("");
+      countEl.textContent = q.length;
+    }
+
+    // ----- API helpers
+    async function post(path, body){
+      const r = await fetch(path, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{}) });
+      const out = await r.json().catch(()=> ({}));
+      if(!r.ok){ alert(out.error || "Action failed"); }
+      return { ok: r.ok, out };
+    }
+    async function refreshServing(){
+      const r = await fetch(`/api/department/${stepKey}/serving`); if(!r.ok) return {ticket:null, student:null};
+      return r.json();
+    }
+
+    // ----- Prefill form
+    function prefill(student){
+      const frm = student?.forms?.registration || {};
+      f.studentId.value  = frm.studentId ?? student?.studentId ?? "";
+      f.usi.value        = frm.usi ?? student?.usi ?? "";
+      f.fullName.value   = frm.fullName ?? student?.name ?? "";
+      f.dob.value        = frm.dob ?? student?.dob ?? "";
+      f.courseName.value = frm.courseName ?? student?.program ?? "";
+      f.intakeDate.value = frm.intakeDate ?? student?.intakeDate ?? "";
+      f.campus.value     = frm.campus ?? student?.campus ?? "";
+      f.usiRegistered.checked   = !!frm.usiRegistered;
+      f.emailCreated.checked    = !!frm.emailCreated;
+      f.detailsVerified.checked = !!frm.detailsVerified;
+      f.detailsDone.checked     = !!frm.detailsDone;
+    }
+
+    // ----- Render
+    async function render(){
+      const { ticket, student } = await refreshServing();
+      servingEl.textContent = ticket || "-";
+      nextLink.style.display = "none";
+      if (student){
+        studentMeta.textContent = `Student: ${student.name||"-"} | Program: ${student.program||"-"} | Status: ${student.status}`;
+        prefill(student);
+        const notes = (student.notes||[]).filter(n=>n.stepKey===stepKey);
+        notesList.innerHTML = notes.length
+          ? notes.slice().reverse().map(n => `<li><small class="muted">${new Date(n.ts).toLocaleString()}</small><br>${n.text}${n.staff?` <span class="muted">— ${n.staff}</span>`:""}</li>`).join("")
+          : `<li class="muted">No notes yet.</li>`;
+      } else {
+        studentMeta.textContent = "Student: - | Program: - | Status: -";
+        notesList.innerHTML = `<li class="muted">No notes yet.</li>`;
+        prefill(null);
+      }
+    }
+
+    // ----- Actions
+    document.getElementById("startNext").onclick = async ()=>{
+      const staff=(staffNameInput.value||"").trim()||null;
+      const {ok,out}=await post(`/api/department/${stepKey}/start-next`,{staff});
+      if(ok && out.ticket){ playChime(); sayNext(out.ticket); }
+    };
+
+    document.getElementById("complete").onclick  = async ()=>{
+      const staff=(staffNameInput.value||"").trim()||null;
+      const note=(noteText.value||"").trim()||null;
+      const {ok,out}=await post(`/api/department/${stepKey}/complete`,{staff,note});
+      if(ok){
+        if(note) noteText.value="";
+        if(out.nextPage){ nextLink.style.display="block"; nextLink.innerHTML=`→ <a href="${out.nextPage}" target="_blank">Open next: ${out.nextPage.replace("/","").replace(".html","").replace("_"," ")}</a>`; }
+      }
+    };
+
+    document.getElementById("hold").onclick      = async ()=>{ const staff=(staffNameInput.value||"").trim()||null; await post(`/api/department/${stepKey}/hold`,{staff}); };
+    document.getElementById("skip").onclick      = async ()=>{ const staff=(staffNameInput.value||"").trim()||null; await post(`/api/department/${stepKey}/skip`,{staff}); };
+
+    document.getElementById("addNote").onclick   = async ()=>{
+      const text=(noteText.value||"").trim(); if(!text) return alert("Please type a note first.");
+      const staff=(staffNameInput.value||"").trim()||null;
+      const {ok}=await post(`/api/department/${stepKey}/note`,{text,staff});
+      if(ok){ noteText.value=""; render(); }
+    };
+
+    // Save Registration form
+    saveBtn.onclick = async ()=>{
+      const staff=(staffNameInput.value||"").trim()||null;
+      const data = {
+        studentId:   f.studentId.value.trim()||null,
+        usi:         f.usi.value.trim()||null,
+        fullName:    f.fullName.value.trim()||null,
+        dob:         f.dob.value || null,
+        courseName:  f.courseName.value.trim()||null,
+        intakeDate:  f.intakeDate.value || null,
+        campus:      f.campus.value || null,
+        usiRegistered:   f.usiRegistered.checked,
+        emailCreated:    f.emailCreated.checked,
+        detailsVerified: f.detailsVerified.checked,
+        detailsDone:     f.detailsDone.checked
+      };
+      const {ok}=await post(`/api/department/${stepKey}/form`,{staff,data});
+      saveStatus.textContent = ok ? "Saved." : "Save failed.";
+      if(ok) setTimeout(()=> saveStatus.textContent="",1200);
+      render();
+    };
+
+    // Initial
+    render();
+  </script>
+</body>
+</html>

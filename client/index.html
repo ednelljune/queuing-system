@@ -4,12 +4,38 @@
   <meta charset="utf-8" />
   <title>Student Check-in</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="preconnect" href="https://cdn.socket.io" />
   <script src="/socket.io/socket.io.js"></script>
   <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
   <style>
-    body { max-width: 860px; margin: 2rem auto; }
-    .ticket { padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+    /* Make the page and form a bit smaller/tighter */
+    body { max-width: 640px; margin: 1.25rem auto; }
+    h2 { font-size: 1.25rem; margin-bottom: .75rem; }
+    article { padding: .75rem; }
+    header strong { font-size: 1rem; }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: .5rem; /* tighter gap */
+    }
+    @media (min-width: 640px) {
+      .form-grid { grid-template-columns: 1fr 1fr; }
+    }
+    /* Make labels a little tighter */
+    label { margin-bottom: .25rem; }
+    /* Smaller inputs and button */
+    input {
+      padding: .45rem .6rem;
+      font-size: .95rem;
+    }
+    button {
+      padding: .5rem .85rem;
+      font-size: .95rem;
+    }
+    /* Ticket card */
+    .ticket { padding: .75rem; border: 1px solid #ddd; border-radius: 8px; }
+    .ticket h3 { font-size: 1.05rem; margin: 0 0 .25rem; }
+    .muted { color: #666; font-size: .95rem; }
   </style>
 </head>
 <body>
@@ -19,19 +45,33 @@
     <article>
       <header><strong>Please check in</strong></header>
       <form id="checkinForm">
-        <label>Name <input name="name" required /></label>
-        <label>Student ID <input name="studentId" /></label>
-        <label>Program <input name="program" required /></label>
-        <label>Email <input type="email" name="email" /></label>
-        <button type="submit">Verify & Assign Ticket</button>
+        <div class="form-grid">
+          <label>Name
+            <input name="name" required />
+          </label>
+          <label>Student ID
+            <input name="studentId" />
+          </label>
+          <label>Program
+            <input name="program" required />
+          </label>
+          <label>Email
+            <input type="email" name="email" />
+          </label>
+        </div>
+        <div style="margin-top:.5rem;">
+          <button type="submit">Verify & Assign Ticket</button>
+        </div>
       </form>
     </article>
 
     <article id="ticketCard" class="ticket" hidden>
       <h3>Your Ticket: <span id="ticket"></span></h3>
-      <p>Current Step: <span id="currentStep"></span></p>
-      <p><a id="progressLink" href="#">Open progress page</a></p>
-      <p><a href="/display.html" target="_blank">See public display</a></p>
+      <p class="muted">Current Step: <span id="currentStep"></span></p>
+      <p>
+        <a id="progressLink" href="#">Open progress page</a> ·
+        <a href="/display.html" target="_blank">See public display</a>
+      </p>
     </article>
   </main>
 

@@ -7,18 +7,33 @@
   <script src="/socket.io/socket.io.js"></script>
   <link href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" rel="stylesheet">
   <style>
-    body { max-width: 960px; margin: 2rem auto; }
+    body { max-width: 1000px; margin: 2rem auto; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
     .muted { color: #777; }
     code { font-weight: 600; }
     .controls { display: flex; flex-wrap: wrap; gap: .5rem; }
     .toggle { margin: .25rem 0; }
+    textarea, input, select { width: 100%; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .5rem; }
+    @media (max-width: 800px) {
+      .row { grid-template-columns: 1fr; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    details > summary { cursor: pointer; }
   </style>
 </head>
 <body>
   <main>
     <h2 id="title">Department Dashboard</h2>
     <p class="muted">Use actions to progress students. Start Next will pull a student if none is currently serving.</p>
+
+    <!-- Quick log export links -->
+    <p class="muted" style="margin-top:.5rem;">
+      Review logs:
+      <a href="/api/logs.csv" target="_blank">Download CSV</a> ·
+      <a href="/api/logs" target="_blank">JSON</a>
+    </p>
 
     <div class="row">
       <article>
@@ -33,12 +48,29 @@
             Sound on next ticket
           </label>
         </div>
-        <div class="toggle" style="margin-bottom:.75rem;">
+        <div class="toggle">
           <label>
             <input type="checkbox" id="voiceToggle" />
             Voice: announce next number
           </label>
         </div>
+
+        <!-- Staff name -->
+        <div class="toggle">
+          <label>Staff name
+            <input id="staffName" placeholder="e.g., Joy" />
+          </label>
+        </div>
+
+        <!-- Notes -->
+        <details style="margin:.5rem 0 1rem;">
+          <summary><strong>Notes for this ticket</strong></summary>
+          <textarea id="noteText" rows="3" placeholder="Add a note for this department... (optional)"></textarea>
+          <div class="controls" style="margin-top:.5rem;">
+            <button id="addNote" class="secondary">Add note</button>
+          </div>
+          <ul id="notesList" style="margin-top:.5rem;"></ul>
+        </details>
 
         <div class="controls">
           <button id="startNext">Start Next</button>
@@ -46,7 +78,6 @@
           <button id="hold" class="secondary">Put on Hold</button>
           <button id="skip" class="secondary">Skip</button>
         </div>
-        <footer class="muted" style="margin-top:.5rem;">Hotkeys: N start, C complete, H hold, S skip</footer>
       </article>
 
       <article>
@@ -56,6 +87,57 @@
       </article>
     </div>
 
+    <!-- REGISTRATION FORM (only shown for dept=registration) -->
+    <article id="regFormSection" hidden>
+      <header><strong>Registration — Student Information</strong></header>
+
+      <div class="grid-2">
+        <label>Student ID
+          <input id="rf_studentId" placeholder="e.g., S123456" />
+        </label>
+        <label>USI Number
+          <input id="rf_usi" placeholder="USI..." />
+        </label>
+      </div>
+
+      <div class="grid-2" style="margin-top:.5rem;">
+        <label>Student Full Name
+          <input id="rf_fullName" placeholder="First Last" />
+        </label>
+        <label>Date of Birth
+          <input id="rf_dob" type="date" />
+        </label>
+      </div>
+
+      <div class="grid-2" style="margin-top:.5rem;">
+        <label>Course Name
+          <input id="rf_courseName" placeholder="e.g., Diploma of IT" />
+        </label>
+        <label>Intake Date
+          <input id="rf_intakeDate" type="date" />
+        </label>
+      </div>
+
+      <div class="grid-3" style="margin-top:.5rem;">
+        <label>Campus
+          <select id="rf_campus">
+            <option value="">Select campus</option>
+            <option value="Sydney">Sydney</option>
+            <option value="Newcastle">Newcastle</option>
+          </select>
+        </label>
+        <label style="align-self:end;">
+          <input type="checkbox" id="rf_detailsDone" />
+          Student details verified (all done)
+        </label>
+        <div style="align-self:end;">
+          <button id="rf_save" class="secondary">Save Registration Form</button>
+        </div>
+      </div>
+
+      <p class="muted" id="rf_status" style="margin-top:.5rem;"></p>
+    </article>
+
     <article>
       <header><strong>On Hold</strong></header>
       <ul id="holdList"></ul>
@@ -63,7 +145,7 @@
   </main>
 
   <script>
-    // Identify which department this dashboard controls
+    // Department from query param
     const qs = new URLSearchParams(location.search);
     const stepKey = qs.get("dept") || "registration";
 
@@ -79,49 +161,79 @@
     const titleEl = document.getElementById("title");
     const studentMeta = document.getElementById("studentMeta");
 
-    // Sound and voice toggles
     const soundToggle = document.getElementById("soundToggle");
     const voiceToggle = document.getElementById("voiceToggle");
+    const staffNameInput = document.getElementById("staffName");
+    const noteText = document.getElementById("noteText");
+    const addNoteBtn = document.getElementById("addNote");
+    const notesList = document.getElementById("notesList");
 
-    // Persist toggle states
+    // Registration form elems
+    const regFormSection = document.getElementById("regFormSection");
+    const rf_studentId = document.getElementById("rf_studentId");
+    const rf_usi = document.getElementById("rf_usi");
+    const rf_fullName = document.getElementById("rf_fullName");
+    const rf_dob = document.getElementById("rf_dob");
+    const rf_courseName = document.getElementById("rf_courseName");
+    const rf_intakeDate = document.getElementById("rf_intakeDate");
+    const rf_campus = document.getElementById("rf_campus");
+    const rf_detailsDone = document.getElementById("rf_detailsDone");
+    const rf_save = document.getElementById("rf_save");
+    const rf_status = document.getElementById("rf_status");
+
+    // Persist toggles and staff name
     soundToggle.checked = localStorage.getItem("queueSound") === "1";
-    soundToggle.addEventListener("change", () => {
-      localStorage.setItem("queueSound", soundToggle.checked ? "1" : "0");
-    });
     voiceToggle.checked = localStorage.getItem("queueVoice") === "1";
-    voiceToggle.addEventListener("change", () => {
-      localStorage.setItem("queueVoice", voiceToggle.checked ? "1" : "0");
-    });
+    staffNameInput.value = localStorage.getItem("queueStaff") || "";
+    soundToggle.addEventListener("change", () =>
+      localStorage.setItem("queueSound", soundToggle.checked ? "1" : "0"),
+    );
+    voiceToggle.addEventListener("change", () =>
+      localStorage.setItem("queueVoice", voiceToggle.checked ? "1" : "0"),
+    );
+    staffNameInput.addEventListener("input", () =>
+      localStorage.setItem("queueStaff", staffNameInput.value.trim()),
+    );
 
-    // Beep - no audio files needed
+    // ---------- Ding-dong chime (two notes) ----------
     let audioCtx = null;
     function ensureAudio() {
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === "suspended") audioCtx.resume();
     }
-    function playBeep(freq = 880, duration = 0.18) {
+    function playChime() {
       if (!soundToggle.checked) return;
       ensureAudio();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      const now = audioCtx.currentTime;
-      osc.type = "sine";
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.001, now);
-      gain.gain.exponentialRampToValueAtTime(0.22, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.start(now);
-      osc.stop(now + duration);
-    }
 
-    // Text to speech support
+      const now = audioCtx.currentTime;
+
+      function scheduleNote(freq, start, dur, peak = 0.28) {
+        const osc = audioCtx.createOscillator();
+        osc.type = "triangle"; // slightly bell-like
+        osc.frequency.setValueAtTime(freq, start);
+
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(peak, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(start);
+        osc.stop(start + dur + 0.05);
+      }
+
+      // "ding" (high)
+      scheduleNote(880.0, now, 0.20, 0.30);
+      // gap then "dong" (low)
+      scheduleNote(587.33, now + 0.24, 0.34, 0.24);
+    }
+    // --------------------------------------------------
+
+    // ---------- TTS (female-lean + slower) ----------
     function supportsTTS() {
       return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
     }
 
-    // Prefer a female English voice if available
     let selectedVoice = null;
     function pickFemaleVoice(voices) {
       const preferredNames = [
@@ -129,7 +241,7 @@
         "Karen","Tessa","Serena","Zira","Jenny","Aria","Lia","Lucy",
       ];
       return voices.find(v =>
-        /female/i.test(v.name) || preferredNames.some(name => v.name.includes(name))
+        /female/i.test(v.name) || preferredNames.some(name => v.name.includes(name)),
       ) || null;
     }
     function pickEnglishVoice(voices) {
@@ -145,12 +257,10 @@
       window.speechSynthesis.onvoiceschanged = loadVoicesAndSelect;
     }
 
-    // Spell out ticket characters, e.g. A102 -> A 1 0 2
     function spellTicket(t) {
       return String(t).split("").join(" ");
     }
 
-    // Say: Next number for {Department} is {A 1 0 2}
     let lastAnnounced = null;
     function sayNext(ticket, stepLabel, phrase = "Next number for") {
       if (!voiceToggle.checked || !supportsTTS() || !ticket) return;
@@ -158,19 +268,17 @@
         const dept = stepLabel || "this department";
         const u = new SpeechSynthesisUtterance(`${phrase} ${dept} is ${spellTicket(ticket)}`);
         if (selectedVoice) u.voice = selectedVoice;
-        u.rate = 0.9;   // slower than default
-        u.pitch = 1.0;  // natural pitch
+        u.rate = 0.9;  // slower
+        u.pitch = 1.0;
         u.volume = 1.0;
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
         lastAnnounced = ticket;
       } catch {}
     }
+    // --------------------------------------------------
 
-    // Track department label for announcements
     let currentStepLabel = null;
-
-    // Render state
     let prevServing = null;
 
     socket.on("state:update", (s) => {
@@ -180,8 +288,47 @@
         titleEl.textContent = `${step.label} - Dashboard`;
         currentStepLabel = step.label;
       }
+      // Show Registration form only for registration dept
+      regFormSection.hidden = stepKey !== "registration";
       render();
     });
+
+    async function refreshServingMetaAndNotes() {
+      const res = await fetch(`/api/department/${encodeURIComponent(stepKey)}/serving`).catch(() => null);
+      if (!res || !res.ok) {
+        notesList.innerHTML = `<li class="muted">No notes.</li>`;
+        prefillRegistrationForm(null);
+        return;
+      }
+      const { ticket, student } = await res.json();
+      if (student) {
+        studentMeta.textContent =
+          `Student: ${student.name || "-"} | Program: ${student.program || "-"} | Status: ${student.status || "-"}`;
+      }
+      const notes = (student?.notes || []).filter(n => n.stepKey === stepKey);
+      notesList.innerHTML = notes.length
+        ? notes.slice().reverse().map(n =>
+            `<li><small class="muted">${new Date(n.ts).toLocaleString()}</small><br>${n.text}${n.staff ? ` <span class="muted">— ${n.staff}</span>` : ""}</li>`,
+          ).join("")
+        : `<li class="muted">No notes yet for this step.</li>`;
+
+      // Prefill Registration form for current student
+      prefillRegistrationForm(student);
+    }
+
+    function prefillRegistrationForm(student) {
+      if (stepKey !== "registration") return;
+      const f = student?.forms?.registration || {};
+      rf_studentId.value  = f.studentId ?? student?.studentId ?? "";
+      rf_usi.value        = f.usi ?? student?.usi ?? "";
+      rf_fullName.value   = f.fullName ?? student?.name ?? "";
+      rf_dob.value        = f.dob ?? student?.dob ?? "";
+      rf_courseName.value = f.courseName ?? student?.program ?? "";
+      rf_intakeDate.value = f.intakeDate ?? "";
+      rf_campus.value     = f.campus ?? "";
+      rf_detailsDone.checked = Boolean(f.detailsDone);
+      rf_status.textContent = "";
+    }
 
     async function render() {
       if (!state) return;
@@ -192,64 +339,109 @@
       queueEl.innerHTML = q.map(t => `<li><code>${t}</code></li>`).join("");
       countEl.textContent = q.length;
 
-      // Show basic meta for the serving ticket if available
       if (serving) {
-        const res = await fetch(`/api/department/${encodeURIComponent(stepKey)}/serving`).catch(() => null);
-        if (res && res.ok) {
-          const { student } = await res.json();
-          if (student) {
-            studentMeta.textContent =
-              `Student: ${student.name || "-"} | Program: ${student.program || "-"} | Status: ${student.status || "-"}`;
-          } else {
-            studentMeta.textContent = "Student: - | Program: - | Status: -";
-          }
-        } else {
-          studentMeta.textContent = "Student: - | Program: - | Status: -";
-        }
+        await refreshServingMetaAndNotes();
       } else {
         studentMeta.textContent = "Student: - | Program: - | Status: -";
+        notesList.innerHTML = `<li class="muted">No notes.</li>`;
+        prefillRegistrationForm(null);
       }
 
-      // Announce when serving changes (socket updates or other stations)
       if (prevServing !== null && serving && serving !== prevServing && serving !== lastAnnounced) {
         sayNext(serving, currentStepLabel);
       }
       prevServing = serving;
 
-      // Simple holds placeholder (avoid server dependency if endpoint not present)
+      // Simple holds placeholder
       holdEl.innerHTML = "<li class='muted'>Use Admin or API to list holds.</li>";
     }
 
-    // Actions
-    async function post(path) {
-      const res = await fetch(path, { method: "POST" });
+    // POST helper
+    async function post(path, body) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
       const out = await res.json().catch(() => ({}));
       if (!res.ok) {
         alert(out.error || "Action failed");
         return out;
       }
-      // On successful start-next, beep and speak the ticket
       if (path.endsWith("/start-next") && out && out.ticket) {
-        playBeep();
+        playChime(); // ding-dong
         sayNext(out.ticket, currentStepLabel);
       }
       return out;
     }
 
-    document.getElementById("startNext").onclick = () => post(`/api/department/${stepKey}/start-next`);
-    document.getElementById("complete").onclick  = () => post(`/api/department/${stepKey}/complete`);
-    document.getElementById("hold").onclick      = () => post(`/api/department/${stepKey}/hold`);
-    document.getElementById("skip").onclick      = () => post(`/api/department/${stepKey}/skip`);
+    // Actions — send staff with each; optional note only on complete
+    document.getElementById("startNext").onclick = () => {
+      const staff = (staffNameInput.value || "").trim() || null;
+      return post(`/api/department/${stepKey}/start-next`, { staff });
+    };
 
-    // Hotkeys
-    window.addEventListener("keydown", (e) => {
-      const k = e.key.toLowerCase();
-      if (["n","c","h","s"].includes(k)) e.preventDefault();
-      if (k === "n") document.getElementById("startNext").click();
-      if (k === "c") document.getElementById("complete").click();
-      if (k === "h") document.getElementById("hold").click();
-      if (k === "s") document.getElementById("skip").click();
-    });
+    document.getElementById("complete").onclick  = () => {
+      const staff = (staffNameInput.value || "").trim() || null;
+      const rawNote = (noteText.value || "").trim();
+      const note = rawNote.length ? rawNote : null;
+      return post(`/api/department/${stepKey}/complete`, { staff, note })
+        .then((out) => {
+          if (out && out.ok && note) {
+            noteText.value = "";
+            refreshServingMetaAndNotes();
+          }
+        });
+    };
+
+    document.getElementById("hold").onclick      = () => {
+      const staff = (staffNameInput.value || "").trim() || null;
+      return post(`/api/department/${stepKey}/hold`, { staff });
+    };
+
+    document.getElementById("skip").onclick      = () => {
+      const staff = (staffNameInput.value || "").trim() || null;
+      return post(`/api/department/${stepKey}/skip`, { staff });
+    };
+
+    // Add note (standalone)
+    addNoteBtn.onclick = async () => {
+      const text = (noteText.value || "").trim();
+      if (!text) return alert("Please type a note first.");
+      const staff = (staffNameInput.value || "").trim() || null;
+      const out = await post(`/api/department/${encodeURIComponent(stepKey)}/note`, { text, staff });
+      if (out && out.ok) {
+        noteText.value = "";
+        await refreshServingMetaAndNotes();
+      }
+    };
+
+    // Save Registration form
+    if (rf_save) {
+      rf_save.onclick = async () => {
+        if (stepKey !== "registration") return;
+        const staff = (staffNameInput.value || "").trim() || null;
+
+        const data = {
+          studentId:   rf_studentId.value.trim() || null,
+          fullName:    rf_fullName.value.trim() || null,
+          dob:         rf_dob.value || null,
+          courseName:  rf_courseName.value.trim() || null,
+          intakeDate:  rf_intakeDate.value || null,
+          campus:      rf_campus.value || null,
+          usi:         rf_usi.value.trim() || null,
+          detailsDone: rf_detailsDone.checked
+        };
+
+        const out = await post(`/api/department/${stepKey}/form`, { staff, data });
+        if (out && out.ok) {
+          rf_status.textContent = "Saved.";
+          // refresh meta to reflect updated name/program
+          await refreshServingMetaAndNotes();
+          setTimeout(() => (rf_status.textContent = ""), 1200);
+        }
+      };
+    }
   </script>
 </body>
 </html>

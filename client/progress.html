@@ -15,7 +15,7 @@
 </head>
 <body>
   <main>
-    <h2>Progress for Ticket <code id="ticket">—</code></h2>
+    <h2>Progress for Ticket <code id="ticket">-</code></h2>
     <p id="studentMeta" class="muted"></p>
     <div id="steps"></div>
   </main>
@@ -23,7 +23,7 @@
   <script>
     const qs = new URLSearchParams(location.search);
     const ticket = qs.get("ticket");
-    document.getElementById("ticket").textContent = ticket || "—";
+    document.getElementById("ticket").textContent = ticket || "-";
 
     const socket = io();
 
@@ -44,7 +44,7 @@
         const labels = Object.fromEntries(st.steps.map(x => [x.key, x.label]));
         const current = s.stepKey;
         const doneSet = new Set(
-          s.history.filter(h => h.action === "complete").map(h => h.stepKey)
+          s.history.filter(h => h.action === "complete").map(h => h.stepKey),
         );
 
         const html = order.map(k => {
