@@ -5,6 +5,40 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 
+// -----------------------------------------------------
+// Apps Script logging config (no dotenv needed)
+// -----------------------------------------------------
+const APPS_URL =
+  process.env.APPS_SCRIPT_URL ||
+  "https://script.google.com/macros/s/AKfycbwjPjBRySUQCYy0DY04_h-OzccjYaG09Tv0B13EfE-kQf1g7IEqja7ugrnuioFcxy2K/exec"; // <-- your /exec URL
+
+const APPS_TOKEN =
+  process.env.APPS_SHARED_SECRET ||
+  "pWQF0tQ2q0eQ2qXQnQ1cW5qR7H0m8YbD"; // <-- must match SHARED_SECRET in Apps Script
+
+async function appsPost(action, payload) {
+  if (!APPS_URL || APPS_URL.includes("XXXXX")) {
+    console.warn("[AppsScript] Skipping post: APPS_URL not set");
+    return;
+  }
+  try {
+    const body = { token: APPS_TOKEN, action, ...payload };
+    const res = await fetch(APPS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.warn(`[AppsScript] ${action} -> HTTP ${res.status}: ${text}`);
+    } else {
+      console.log(`[AppsScript] ${action} -> ${text}`);
+    }
+  } catch (e) {
+    console.warn("[AppsScript] post failed:", e);
+  }
+}
+
 // Paths
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,26 +52,35 @@ app.use(cors());
 app.use(express.json());
 app.use("/", express.static(path.join(__dirname, "../client")));
 
-// Steps
+// Steps (keys align with ?dept= in dashboard)
 const steps = [
-  { key: "registration",       label: "Registration",       dept: "Enrolment Officer",   prefix: "A" },
+  { key: "registration",       label: "Registration",       dept: "Enrolment Officer",    prefix: "A" },
   { key: "marketing",          label: "Marketing",          dept: "Marketing Department", prefix: "A" },
   { key: "class_registration", label: "Class Registration", dept: "Timetable",            prefix: "A" },
   { key: "tuition_payment",    label: "Tuition Payment",    dept: "Fees",                 prefix: "A" },
   { key: "student_id",         label: "Student ID",         dept: "Library",              prefix: "A" }
 ];
 
-// Ticket generator (swap for DB sequence later)
+// Ticket generator: A1..A100 → B1..B100 → … → Z100 → A1 loop
 const makeTicketId = (() => {
-  let seq = 1000;
-  return (prefix = "A") => `${prefix}${++seq}`;
+  const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let prefixIndex = 0; // 'A'
+  let number = 1;      // 1..100
+  return (_ignored = "A") => {
+    const t = `${LETTERS[prefixIndex]}${number}`;
+    number += 1;
+    if (number > 100) {
+      number = 1;
+      prefixIndex = (prefixIndex + 1) % LETTERS.length;
+    }
+    return t;
+  };
 })();
 
 // In-memory state
-const students = new Map(); // ticket -> student
+const students = new Map();                      // ticket -> student
 const queues = new Map(steps.map(s => [s.key, []]));
 const currentServing = new Map(steps.map(s => [s.key, null]));
-const holds = new Map(steps.map(s => [s.key, new Set()]));
 
 // Audit log (in-memory)
 const auditLogs = []; // [{ ts, event, stepKey, ticket, staff, note, meta }]
@@ -65,7 +108,6 @@ const publicState = () => ({
   steps,
   queues: Object.fromEntries([...queues.entries()]),
   currentServing: Object.fromEntries([...currentServing.entries()]),
-  holdsCount: Object.fromEntries([...holds.entries()].map(([k, set]) => [k, set.size])),
 });
 
 const emitState = () => io.emit("state:update", publicState());
@@ -74,10 +116,10 @@ const emitStudent = (ticket) => {
   if (student) io.emit("student:update", student);
 };
 
-// API
+// ================= API =================
 
-// 1) Student check-in (Step 1 issues ticket)
-app.post("/api/checkin", (req, res) => {
+// 1) Student check-in (Campus arrival)
+app.post("/api/checkin", async (req, res) => {
   const { name, studentId, program, email, staff } = req.body || {};
   if (!name || !program) return res.status(400).json({ error: "name and program are required" });
 
@@ -91,9 +133,9 @@ app.post("/api/checkin", (req, res) => {
     program,
     email: email || null,
     stepKey: reg.key,
-    status: "queued", // queued | serving | hold | complete
+    status: "queued", // queued | serving | complete
     history: [],
-    notes: [], // per-ticket notes across steps
+    notes: [],
     createdAt: new Date().toISOString(),
   };
 
@@ -102,20 +144,26 @@ app.post("/api/checkin", (req, res) => {
   student.history.push({ stepKey: reg.key, action: "checkin", ts: new Date().toISOString(), staff: staff || null });
   logEvent({ event: "checkin", stepKey: reg.key, ticket, staff: staff || null, meta: { name, program } });
 
+  // Apps Script: campus arrival
+  await appsPost("checkin", {
+    ticket,
+    name,
+    program,
+    email: email || "",
+    ts: new Date().toISOString(),
+  });
+
   emitState();
   emitStudent(ticket);
   res.json({ ticket, stepKey: reg.key, steps });
 });
 
-// 2) Department actions
-
-// Pull next if idle
-app.post("/api/department/:step/start-next", (req, res) => {
+// 2) Start next (Department IN)
+app.post("/api/department/:step/start-next", async (req, res) => {
   const stepKey = req.params.step;
   const { staff } = req.body || {};
 
   if (!queues.has(stepKey)) return res.status(404).json({ error: "Unknown step" });
-
   if (currentServing.get(stepKey)) {
     return res.status(409).json({ error: "Already serving a student", ticket: currentServing.get(stepKey) });
   }
@@ -130,11 +178,15 @@ app.post("/api/department/:step/start-next", (req, res) => {
 
   currentServing.set(stepKey, ticket);
   const student = students.get(ticket);
+  const ts = new Date().toISOString();
   if (student) {
     student.status = "serving";
     student.stepKey = stepKey;
-    student.history.push({ stepKey, action: "start", ts: new Date().toISOString(), staff: staff || null });
+    student.history.push({ stepKey, action: "start", ts, staff: staff || null });
     logEvent({ event: "start", stepKey, ticket, staff: staff || null });
+
+    // Apps Script: dept IN
+    await appsPost("dept_in", { ticket, stepKey, ts });
   }
 
   emitState();
@@ -142,48 +194,41 @@ app.post("/api/department/:step/start-next", (req, res) => {
   res.json({ ticket });
 });
 
-// Complete current -> move to next or finish (with optional note logged)
-app.post("/api/department/:step/complete", (req, res) => {
+// 3) Complete (Department OUT)
+app.post("/api/department/:step/complete", async (req, res) => {
   const stepKey = req.params.step;
-  const { staff, note } = req.body || {};  // optional note
+  const { staff, note } = req.body || {};
   const serving = currentServing.get(stepKey);
   if (!serving) return res.status(409).json({ error: "No student currently serving" });
 
   const student = students.get(serving);
   if (!student) return res.status(404).json({ error: "Student not found" });
 
-  // History entry (keep note if provided)
+  const ts = new Date().toISOString();
   student.history.push({
     stepKey,
     action: "complete",
-    ts: new Date().toISOString(),
+    ts,
     staff: staff || null,
     note: note?.trim() ? note.trim() : null,
   });
-
-  // If note provided, also add to notes for this step
   if (note && note.trim()) {
-    student.notes.push({
-      stepKey,
-      text: note.trim(),
-      staff: staff || null,
-      ts: new Date().toISOString(),
-    });
+    student.notes.push({ stepKey, text: note.trim(), staff: staff || null, ts });
   }
-
-  // Log completion (note included if provided)
   logEvent({
     event: "complete",
     stepKey,
     ticket: serving,
     staff: staff || null,
-    note: note?.trim() ? note.trim() : null,
+    note: note?.trim() || null,
     meta: { next: nextStepKey(stepKey) },
   });
 
-  // Clear serving and move on
-  currentServing.set(stepKey, null);
+  // Apps Script: dept OUT
+  await appsPost("dept_out", { ticket: serving, stepKey, ts });
 
+  // Move to next or finish
+  currentServing.set(stepKey, null);
   const nextKey = nextStepKey(stepKey);
   if (nextKey) {
     student.stepKey = nextKey;
@@ -198,52 +243,53 @@ app.post("/api/department/:step/complete", (req, res) => {
   res.json({ ok: true, nextStep: nextKey || null });
 });
 
-// Put current on hold
-app.post("/api/department/:step/hold", (req, res) => {
+// 4) HOLD → re-queue to end (no sheet change)
+app.post("/api/department/:step/hold", async (req, res) => {
   const stepKey = req.params.step;
-  const { staff } = req.body || {};
-  const serving = currentServing.get(stepKey);
-  if (!serving) return res.status(409).json({ error: "No student currently serving" });
+  const { staff, ticket: requestedTicket, reason } = req.body || {};
+  if (!queues.has(stepKey)) return res.status(404).json({ error: "Unknown step" });
 
-  currentServing.set(stepKey, null);
-  const student = students.get(serving);
-  if (student) {
-    student.status = "hold";
-    student.history.push({ stepKey, action: "hold", ts: new Date().toISOString(), staff: staff || null });
-    holds.get(stepKey).add(serving);
-    logEvent({ event: "hold", stepKey, ticket: serving, staff: staff || null });
+  const q = queues.get(stepKey);
+
+  let target = requestedTicket || currentServing.get(stepKey);
+  if (!target) return res.status(409).json({ error: "No student currently serving and no ticket specified" });
+
+  if (currentServing.get(stepKey) === target) {
+    currentServing.set(stepKey, null);
   }
+  const i = q.indexOf(target);
+  if (i >= 0) q.splice(i, 1);
+  q.push(target);
 
-  emitState();
-  emitStudent(serving);
-  res.json({ ok: true });
-});
-
-// Return a held ticket to the queue
-app.post("/api/department/:step/return/:ticket", (req, res) => {
-  const stepKey = req.params.step;
-  const { staff } = req.body || {};
-  const { ticket } = req.params;
-  if (!holds.get(stepKey).has(ticket)) {
-    return res.status(404).json({ error: "Ticket not on hold at this step" });
-  }
-  holds.get(stepKey).delete(ticket);
-  queues.get(stepKey).push(ticket);
-
-  const student = students.get(ticket);
+  const student = students.get(target);
+  const ts = new Date().toISOString();
   if (student) {
     student.status = "queued";
-    student.history.push({ stepKey, action: "return", ts: new Date().toISOString(), staff: staff || null });
-    logEvent({ event: "return", stepKey, ticket, staff: staff || null });
+    student.stepKey = stepKey;
+    student.history.push({
+      stepKey,
+      action: "hold_requeue",
+      ts,
+      staff: staff || null,
+      note: reason || null,
+    });
   }
+  logEvent({
+    event: "hold_requeue",
+    stepKey,
+    ticket: target,
+    staff: staff || null,
+    note: reason || null,
+    meta: { reason: reason || undefined },
+  });
 
   emitState();
-  emitStudent(ticket);
-  res.json({ ok: true });
+  if (student) emitStudent(target);
+  res.json({ ok: true, ticket: target, queuedAtEnd: true });
 });
 
-// Skip current -> send to end of queue
-app.post("/api/department/:step/skip", (req, res) => {
+// 5) Skip → re-queue to end + mark dept OUT
+app.post("/api/department/:step/skip", async (req, res) => {
   const stepKey = req.params.step;
   const { staff } = req.body || {};
   const serving = currentServing.get(stepKey);
@@ -253,18 +299,22 @@ app.post("/api/department/:step/skip", (req, res) => {
   queues.get(stepKey).push(serving);
 
   const student = students.get(serving);
+  const ts = new Date().toISOString();
   if (student) {
     student.status = "queued";
-    student.history.push({ stepKey, action: "skip", ts: new Date().toISOString(), staff: staff || null });
+    student.history.push({ stepKey, action: "skip", ts, staff: staff || null });
     logEvent({ event: "skip", stepKey, ticket: serving, staff: staff || null });
   }
+
+  // Apps Script: treat skip as dept OUT
+  await appsPost("dept_out", { ticket: serving, stepKey, ts });
 
   emitState();
   emitStudent(serving);
   res.json({ ok: true });
 });
 
-// Notes: add a note for current serving (or specify ticket)
+// 6) Notes
 app.post("/api/department/:step/note", (req, res) => {
   const stepKey = req.params.step;
   const { text, staff, ticket } = req.body || {};
@@ -289,24 +339,13 @@ app.post("/api/department/:step/note", (req, res) => {
   res.json({ ok: true, note: noteEntry });
 });
 
-// Read-only
-app.get("/api/status", (req, res) => {
-  res.json(publicState());
-});
-
+// Read-only helpers
+app.get("/api/status", (req, res) => res.json(publicState()));
 app.get("/api/student/:ticket", (req, res) => {
   const student = students.get(req.params.ticket);
   if (!student) return res.status(404).json({ error: "Not found" });
   res.json(student);
 });
-
-app.get("/api/department/:step/holds", (req, res) => {
-  const stepKey = req.params.step;
-  if (!holds.has(stepKey)) return res.status(404).json({ error: "Unknown step" });
-  const items = Array.from(holds.get(stepKey).values());
-  res.json({ stepKey, tickets: items, count: items.length });
-});
-
 app.get("/api/department/:step/serving", (req, res) => {
   const stepKey = req.params.step;
   const t = currentServing.get(stepKey);
@@ -314,11 +353,8 @@ app.get("/api/department/:step/serving", (req, res) => {
   res.json({ ticket: t || null, student });
 });
 
-// Logs export
-app.get("/api/logs", (req, res) => {
-  res.json({ logs: auditLogs });
-});
-
+// Logs export (raw)
+app.get("/api/logs", (req, res) => res.json({ logs: auditLogs }));
 app.get("/api/logs.csv", (req, res) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", "attachment; filename=\"queue-logs.csv\"");
@@ -328,9 +364,11 @@ app.get("/api/logs.csv", (req, res) => {
     const s = typeof v === "string" ? v : JSON.stringify(v);
     return `"${s.replace(/"/g, '""')}"`;
   };
-  const rows = auditLogs.map(r => [
-    r.ts, r.event, r.stepKey, r.ticket, r.staff, r.note, r.meta ? JSON.stringify(r.meta) : "",
-  ].map(esc).join(","));
+  const rows = auditLogs.map(r =>
+    [r.ts, r.event, r.stepKey, r.ticket, r.staff, r.note, r.meta ? JSON.stringify(r.meta) : ""]
+      .map(esc)
+      .join(",")
+  );
   res.send([header.join(","), ...rows].join("\n"));
 });
 
@@ -348,7 +386,6 @@ function printUrls(actualPort) {
   console.log(`  Student Check-in:     http://localhost:${actualPort}/index.html`);
   console.log(`  Public Display:       http://localhost:${actualPort}/display.html`);
   console.log(`  Department Dashboard: http://localhost:${actualPort}/dashboard.html?dept=registration`);
-  console.log(`  Student Progress:     http://localhost:${actualPort}/progress.html?ticket=A1001`);
 }
 
 function start(port) {
